@@ -4,3 +4,5 @@ langchain
 openai
 python-dotenv
 langchain-community
+yfinance
+langchain-openai
