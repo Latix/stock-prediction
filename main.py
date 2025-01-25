@@ -35,13 +35,24 @@ Market Data:
 - Current Price: {current_price}
 - Previous Close: {previous_close}
 - 1-Day Change (%): {change_percent}
+- 50-Day Moving Average: {moving_avg_50}
+- 200-Day Moving Average: {moving_avg_200}
+- Historical Volatility (%): {volatility}
 
 Provide your advice:
 """
 
 # Create a LangChain prompt template
 prompt = PromptTemplate(
-    input_variables=["stock_name", "current_price", "previous_close", "change_percent"],
+    input_variables=[
+        "stock_name",
+        "current_price",
+        "previous_close",
+        "change_percent",
+        "moving_avg_50",
+        "moving_avg_200",
+        "volatility"
+    ],
     template=trading_prompt_template,
 )
 
@@ -50,40 +61,43 @@ def stock_advice():
     try:
         # Parse request data
         data = request.get_json()
-        stock_name = data.get("stock_name", "").strip()
+        stock_name = data.get("stock_name", "").strip().upper()
 
         if not stock_name:
             return jsonify({"error": "Stock name is required"}), 400
 
         # Fetch real-time market data using Yahoo Finance
         ticker = yf.Ticker(stock_name)
-        history = ticker.history(period="1d")
+        history = ticker.history(period="1y")  # 1 year of data for analysis
         if history.empty:
             return jsonify({"error": f"No data found for stock: {stock_name}"}), 404
 
+        # Calculate key metrics
         current_price = round(history["Close"][-1], 2)
         previous_close = round(history["Close"][-2], 2) if len(history) > 1 else current_price
         change_percent = round(((current_price - previous_close) / previous_close) * 100, 2)
+        moving_avg_50 = round(history["Close"].rolling(window=50).mean().iloc[-1], 2)
+        moving_avg_200 = round(history["Close"].rolling(window=200).mean().iloc[-1], 2)
+        volatility = round(history["Close"].pct_change().std() * 100, 2)
 
-        # Format the prompt with market data
-        advice = llm(prompt.format(
+        # Generate prompt for LangChain
+        advice = prompt.format(
             stock_name=stock_name,
             current_price=current_price,
             previous_close=previous_close,
             change_percent=change_percent,
-        ))
+            moving_avg_50=moving_avg_50,
+            moving_avg_200=moving_avg_200,
+            volatility=volatility
+        )
 
-        return jsonify({
-            "advice": advice.strip(),
-            "market_data": {
-                "current_price": current_price,
-                "previous_close": previous_close,
-                "change_percent": change_percent,
-            }
-        }), 200
+        # Get advice from LangChain model
+        response = llm(advice)
+
+        return jsonify({"advice": response})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=9094)
+    app.run(debug=True, port=9092)
