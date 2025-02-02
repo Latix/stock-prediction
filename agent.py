@@ -10,14 +10,14 @@ from langchain_core.tools import tool
 from langchain_community.tools import TavilySearchResults
 
 # ------------------------------------------------------------------------------
-# 1. Load environment variables and set up the API keys.
+# Load environment variables and set up the API keys.
 # ------------------------------------------------------------------------------
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TAVIL_API_KEY = os.getenv("TAVIL_API_KEY")  # Ensure this is set in .env
 
 # ------------------------------------------------------------------------------
-# 2. Set up the Tavil client.
+# Set up the Tavil client.
 # ------------------------------------------------------------------------------
 tavil = TavilySearchResults(
     max_results=5,
@@ -28,26 +28,28 @@ tavil = TavilySearchResults(
 )
 
 # ------------------------------------------------------------------------------
-# 3. Define the LLM and bind the tool.
+# Define the LLM and bind the tool.
 # ------------------------------------------------------------------------------
 tools = [tavil]
 llm = ChatOpenAI(openai_api_key=OPENAI_API_KEY, model="gpt-4", temperature=0)
 llm_with_tools = llm.bind_tools(tools, parallel_tool_calls=False)
 
 # ------------------------------------------------------------------------------
-# 4. Define the system message.
+# Define the system message.
 # ------------------------------------------------------------------------------
 sys_msg = SystemMessage(
-    content="You are an AI assistant that fetches data with the tool 'search_tavil' when needed."
+    content="You are an AI assistant."
 )
 
+
 # ------------------------------------------------------------------------------
-# 5. Define the assistant node.
+# Define the assistant node.
 # ------------------------------------------------------------------------------
 def assistant(state: MessagesState):
     messages = state["messages"]
     response = llm_with_tools.invoke([sys_msg] + messages)
     return {"messages": messages + [response]}
+
 
 # Function to serialize messages for JSON response
 def serialize_messages(data):
@@ -58,10 +60,11 @@ def serialize_messages(data):
     elif hasattr(data, "__dict__"):  # Convert objects with __dict__ attribute
         return {key: serialize_messages(value) for key, value in data.__dict__.items()}
     else:
-        return data  # Primitive types are returned as is
+        return data
+
 
 # ------------------------------------------------------------------------------
-# 6. Build the LangGraph.
+# Build the LangGraph.
 # ------------------------------------------------------------------------------
 builder = StateGraph(MessagesState)
 
@@ -74,8 +77,9 @@ builder.add_edge("tools", "assistant")
 
 graph = builder.compile()
 
+
 # ------------------------------------------------------------------------------
-# 7. Flask API to expose the graph as a service.
+# Flask API to expose the graph as a service.
 # ------------------------------------------------------------------------------
 app = Flask(__name__)
 
@@ -99,6 +103,7 @@ def query_graph():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == '__main__':
     app.run(debug=True)
