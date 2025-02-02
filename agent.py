@@ -3,21 +3,23 @@ import json
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import AnyMessage, SystemMessage, HumanMessage, AIMessage
 from langgraph.graph import MessagesState, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
-from langchain_core.tools import tool
 from langchain_community.tools import TavilySearchResults
+from operator import add
+from typing_extensions import TypedDict
+from typing import List, Annotated
 
 # ------------------------------------------------------------------------------
-# Load environment variables and set up the API keys.
+# 1. Load environment variables and set up the API keys.
 # ------------------------------------------------------------------------------
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TAVIL_API_KEY = os.getenv("TAVIL_API_KEY")  # Ensure this is set in .env
 
 # ------------------------------------------------------------------------------
-# Set up the Tavil client.
+# 2. Set up the Tavil client.
 # ------------------------------------------------------------------------------
 tavil = TavilySearchResults(
     max_results=5,
@@ -28,14 +30,15 @@ tavil = TavilySearchResults(
 )
 
 # ------------------------------------------------------------------------------
-# Define the LLM and bind the tool.
+# 3. Define the LLM and bind the tool.
 # ------------------------------------------------------------------------------
 tools = [tavil]
+# Use a valid model name (e.g. "gpt-4")
 llm = ChatOpenAI(openai_api_key=OPENAI_API_KEY, model="gpt-4", temperature=0)
 llm_with_tools = llm.bind_tools(tools, parallel_tool_calls=False)
 
 # ------------------------------------------------------------------------------
-# Define the system message.
+# 4. Define the system message.
 # ------------------------------------------------------------------------------
 sys_msg = SystemMessage(
     content="You are an AI assistant."
@@ -43,70 +46,112 @@ sys_msg = SystemMessage(
 
 
 # ------------------------------------------------------------------------------
-# Define the assistant node.
+# 5. Define state types.
 # ------------------------------------------------------------------------------
-def assistant(state: MessagesState):
+# For input state we only need a list of messages.
+class OverallState(TypedDict):
+    messages: Annotated[List[AnyMessage], add]
+
+
+# The final output will be a dictionary with a single "answer" key.
+class OutputState(TypedDict):
+    answer: str
+
+
+# ------------------------------------------------------------------------------
+# 6. Define the assistant node.
+# This node calls the LLM (with tools bound) and appends the AI response.
+# ------------------------------------------------------------------------------
+def assistant(state: OverallState) -> OverallState:
     messages = state["messages"]
+    # Invoke with the system message plus the input messages.
     response = llm_with_tools.invoke([sys_msg] + messages)
-    return {"messages": messages + [response]}
-
-
-# Function to serialize messages for JSON response
-def serialize_messages(data):
-    if isinstance(data, list):
-        return [serialize_messages(item) for item in data]
-    elif isinstance(data, dict):
-        return {key: serialize_messages(value) for key, value in data.items()}
-    elif hasattr(data, "__dict__"):  # Convert objects with __dict__ attribute
-        return {key: serialize_messages(value) for key, value in data.__dict__.items()}
+    if isinstance(response, AIMessage):
+        new_messages = messages + [response]
     else:
-        return data
+        new_messages = messages
+    return {"messages": new_messages}
 
 
 # ------------------------------------------------------------------------------
-# Build the LangGraph.
+# 7. Define the summarizer node.
+# This node extracts the content from the last AIMessage,
+# asks the LLM to summarize it, and returns the final answer.
 # ------------------------------------------------------------------------------
-builder = StateGraph(MessagesState)
+def summarizer(state: OverallState) -> OutputState:
+    messages = state["messages"]
+    if not messages:
+        return {"answer": "No messages found."}
+
+    # Assume the last message is the assistant's response.
+    last_msg = messages[-1]
+    if not hasattr(last_msg, "content"):
+        return {"answer": "No content available in the last message."}
+
+    original_text = last_msg.content
+
+    # Build a summarization prompt using .format() to set the context variable.
+    summarization_prompt = "Please summarize the following text in a concise manner: {context}".format(
+        context=original_text)
+
+    # Invoke the LLM with the summarization prompt.
+    summary_response = llm.invoke([SystemMessage(content=summarization_prompt)])
+
+    if isinstance(summary_response, AIMessage) and summary_response.content:
+        summary_text = summary_response.content
+    else:
+        summary_text = "No summary produced."
+
+    return {"answer": summary_text}
+
+
+# ------------------------------------------------------------------------------
+# 8. Build the LangGraph.
+# We'll add both the assistant and the summarizer nodes.
+# The flow will be:
+#    START --> assistant --> summarizer  --> output state.
+# ------------------------------------------------------------------------------
+builder = StateGraph(OverallState, output=OutputState)
 
 builder.add_node("assistant", assistant)
 builder.add_node("tools", ToolNode(tools))
+builder.add_node("summarizer", summarizer)
 
+# Define edges:
 builder.add_edge(START, "assistant")
 builder.add_conditional_edges("assistant", tools_condition)
 builder.add_edge("tools", "assistant")
+builder.add_edge("assistant", "summarizer")
 
 graph = builder.compile()
 
-
 # ------------------------------------------------------------------------------
-# Flask API to expose the graph as a service.
+# 9. Flask API to expose the graph as a service.
 # ------------------------------------------------------------------------------
 app = Flask(__name__)
+
 
 @app.route('/query', methods=['POST'])
 def query_graph():
     """
     API endpoint to process a user query using the LangGraph pipeline.
     Expects a JSON payload with a 'query' field.
+    Returns a JSON object containing only the final answer.
     """
     try:
         data = request.get_json()
         if not data or "query" not in data:
             return jsonify({"error": "Missing 'query' in request body"}), 400
 
-        query = data["query"]
-        initial_message = HumanMessage(content=query)
-        result = graph.invoke({"messages": [initial_message]})
-        serialized_result = serialize_messages(result)
+        query_text = data["query"]
+        # Create a HumanMessage from the query and wrap it in a list.
+        initial_message = HumanMessage(content=query_text)
+        input_state: OverallState = {"messages": [initial_message]}
 
-        # Extract the last message
-        if isinstance(serialized_result, dict) and "messages" in serialized_result:
-            last_message = serialized_result["messages"][-1]  # Get the last message
-        else:
-            return jsonify({"error": "Unexpected response format"}), 500
+        # Invoke the graph. The final output state is produced by the summarizer node.
+        result_state = graph.invoke(input_state)
 
-        # Return only the "content" field
-        return jsonify({"answer": last_message.get("content", "No content available")})
+        return jsonify(result_state)
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
