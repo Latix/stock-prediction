@@ -31,7 +31,7 @@ tavil = TavilySearchResults(
 # 3. Define the LLM and bind the tool.
 # ------------------------------------------------------------------------------
 tools = [tavil]
-llm = ChatOpenAI(openai_api_key=OPENAI_API_KEY)
+llm = ChatOpenAI(openai_api_key=OPENAI_API_KEY, model="gpt-4", temperature=0)
 llm_with_tools = llm.bind_tools(tools, parallel_tool_calls=False)
 
 # ------------------------------------------------------------------------------
