@@ -99,7 +99,14 @@ def query_graph():
         result = graph.invoke({"messages": [initial_message]})
         serialized_result = serialize_messages(result)
 
-        return jsonify(serialized_result)
+        # Extract the last message
+        if isinstance(serialized_result, dict) and "messages" in serialized_result:
+            last_message = serialized_result["messages"][-1]  # Get the last message
+        else:
+            return jsonify({"error": "Unexpected response format"}), 500
+
+        # Return only the "content" field
+        return jsonify({"answer": last_message.get("content", "No content available")})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
