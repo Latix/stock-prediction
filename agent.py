@@ -25,7 +25,7 @@ TAVIL_API_KEY = os.getenv("TAVIL_API_KEY")  # Ensure this is set in .env
 # ------------------------------------------------------------------------------
 tavil = TavilySearchResults(
     max_results=20,
-    search_depth="advanced",
+    search_depth="full",
     include_answer=True,
     include_raw_content=False,
     include_images=False,
@@ -55,11 +55,11 @@ sys_msg = SystemMessage(
 class Article(BaseModel):
     title: str
     summary: str
-    abstract: Optional[str] = None
-    key_insights: Optional[str] = None
-    link: Optional[str] = None
-    published: Optional[str] = None
-    references: Optional[str] = None
+    abstract: str
+    key_insights: str
+    link: str
+    published: str
+    references: str
     source: Optional[str] = None
 
 class SummarizationOutput(BaseModel):
@@ -135,7 +135,7 @@ def summarizer(state: OverallState) -> OutputState:
         # Validate with Pydantic
         validated_output = SummarizationOutput(answer=articles)
 
-        return validated_output.dict()
+        return validated_output.model_dump()
 
     except (json.JSONDecodeError, ValidationError) as e:
         # If JSON parsing fails, extract articles manually (fallback)
