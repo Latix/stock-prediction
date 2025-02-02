@@ -1,28 +1,30 @@
 import os
 import json
+import re
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+from pydantic import BaseModel, ValidationError
+from typing import List, Optional
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AnyMessage, SystemMessage, HumanMessage, AIMessage
 from langgraph.graph import MessagesState, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_community.tools import TavilySearchResults
 from operator import add
-from typing_extensions import TypedDict
-from typing import List, Annotated
+from typing_extensions import TypedDict, Annotated
 
 # ------------------------------------------------------------------------------
-# 1. Load environment variables and set up the API keys.
+# 1. Load environment variables and set up API keys.
 # ------------------------------------------------------------------------------
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TAVIL_API_KEY = os.getenv("TAVIL_API_KEY")  # Ensure this is set in .env
 
 # ------------------------------------------------------------------------------
-# 2. Set up the Tavil client.
+# 2. Set up the Tavily search tool.
 # ------------------------------------------------------------------------------
 tavil = TavilySearchResults(
-    max_results=5,
+    max_results=20,
     search_depth="advanced",
     include_answer=True,
     include_raw_content=False,
@@ -33,83 +35,119 @@ tavil = TavilySearchResults(
 # 3. Define the LLM and bind the tool.
 # ------------------------------------------------------------------------------
 tools = [tavil]
-# Use a valid model name (e.g. "gpt-4")
 llm = ChatOpenAI(openai_api_key=OPENAI_API_KEY, model="gpt-4", temperature=0)
 llm_with_tools = llm.bind_tools(tools, parallel_tool_calls=False)
 
 # ------------------------------------------------------------------------------
-# 4. Define the system message.
+# 4. Define the system message to enforce structured JSON output.
 # ------------------------------------------------------------------------------
 sys_msg = SystemMessage(
-    content="You are an AI assistant."
+    content="You are an AI assistant. Always return a JSON array of articles with the following format:\n"
+            '[{"title": "Article Title", "summary": "Brief summary here", "abstract": "Abstract text", '
+            '"key_insights": "Bullet points as HTML", "link": "URL", "published": "Date", '
+            '"references": "Reference citation", "source": "Data source"}]. '
+            "Do NOT return plain text or bullet points outside of the JSON format."
 )
 
+# ------------------------------------------------------------------------------
+# 5. Define Pydantic Model for Structured Validation.
+# ------------------------------------------------------------------------------
+class Article(BaseModel):
+    title: str
+    summary: str
+    abstract: Optional[str] = None
+    key_insights: Optional[str] = None
+    link: Optional[str] = None
+    published: Optional[str] = None
+    references: Optional[str] = None
+    source: Optional[str] = None
+
+class SummarizationOutput(BaseModel):
+    answer: List[Article]
 
 # ------------------------------------------------------------------------------
-# 5. Define state types.
+# 6. Define state types.
 # ------------------------------------------------------------------------------
-# For input state we only need a list of messages.
 class OverallState(TypedDict):
     messages: Annotated[List[AnyMessage], add]
 
-
-# The final output will be a dictionary with a single "answer" key.
 class OutputState(TypedDict):
-    answer: str
-
+    answer: List[Article]
 
 # ------------------------------------------------------------------------------
-# 6. Define the assistant node.
-# This node calls the LLM (with tools bound) and appends the AI response.
+# 7. Define the assistant node.
 # ------------------------------------------------------------------------------
 def assistant(state: OverallState) -> OverallState:
     messages = state["messages"]
-    # Invoke with the system message plus the input messages.
     response = llm_with_tools.invoke([sys_msg] + messages)
+
     if isinstance(response, AIMessage):
         new_messages = messages + [response]
     else:
         new_messages = messages
+
     return {"messages": new_messages}
 
+# ------------------------------------------------------------------------------
+# 8. Define a function to extract structured articles from plain text (fallback method).
+# ------------------------------------------------------------------------------
+def extract_articles(text: str) -> List[dict]:
+    """
+    Extracts article details from plain text using regex.
+    Returns a list of dictionaries with keys: title, summary, link, etc.
+    """
+    article_pattern = re.findall(r"\d+\.\s\[(.*?)\]\((.*?)\):\s(.*)", text)
+
+    articles = []
+    for match in article_pattern:
+        title, link, summary = match
+        articles.append({
+            "title": title,
+            "summary": summary,
+            "link": link,
+            "abstract": None,
+            "key_insights": None,
+            "published": None,
+            "references": None,
+            "source": "extracted_text"
+        })
+
+    return articles
 
 # ------------------------------------------------------------------------------
-# 7. Define the summarizer node.
-# This node extracts the content from the last AIMessage,
-# asks the LLM to summarize it, and returns the final answer.
+# 9. Define the summarizer node with Pydantic validation.
 # ------------------------------------------------------------------------------
 def summarizer(state: OverallState) -> OutputState:
     messages = state["messages"]
     if not messages:
-        return {"answer": "No messages found."}
+        return {"answer": [{"title": "Parsing Error", "summary": "No messages found."}]}
 
-    # Assume the last message is the assistant's response.
     last_msg = messages[-1]
-    if not hasattr(last_msg, "content"):
-        return {"answer": "No content available in the last message."}
+    if not hasattr(last_msg, "content") or not last_msg.content.strip():
+        return {"answer": [{"title": "Parsing Error", "summary": "No response from the assistant."}]}
 
-    original_text = last_msg.content
+    print("Assistant's Response Content:", last_msg.content)  # Debugging output
 
-    # Build a summarization prompt using .format() to set the context variable.
-    summarization_prompt = "Please summarize the following text in a concise manner: {context}".format(
-        context=original_text)
+    # Try parsing the response as JSON
+    try:
+        articles = json.loads(last_msg.content)
 
-    # Invoke the LLM with the summarization prompt.
-    summary_response = llm.invoke([SystemMessage(content=summarization_prompt)])
+        # Validate with Pydantic
+        validated_output = SummarizationOutput(answer=articles)
 
-    if isinstance(summary_response, AIMessage) and summary_response.content:
-        summary_text = summary_response.content
-    else:
-        summary_text = "No summary produced."
+        return validated_output.dict()
 
-    return {"answer": summary_text}
+    except (json.JSONDecodeError, ValidationError) as e:
+        # If JSON parsing fails, extract articles manually (fallback)
+        extracted_articles = extract_articles(last_msg.content)
 
+        if extracted_articles:
+            return {"answer": extracted_articles}
+
+        return {"answer": [{"title": "Parsing Error", "summary": f"Error parsing articles: {str(e)}"}]}
 
 # ------------------------------------------------------------------------------
-# 8. Build the LangGraph.
-# We'll add both the assistant and the summarizer nodes.
-# The flow will be:
-#    START --> assistant --> summarizer  --> output state.
+# 10. Build the LangGraph.
 # ------------------------------------------------------------------------------
 builder = StateGraph(OverallState, output=OutputState)
 
@@ -126,10 +164,9 @@ builder.add_edge("assistant", "summarizer")
 graph = builder.compile()
 
 # ------------------------------------------------------------------------------
-# 9. Flask API to expose the graph as a service.
+# 11. Flask API to expose the graph as a service.
 # ------------------------------------------------------------------------------
 app = Flask(__name__)
-
 
 @app.route('/query', methods=['POST'])
 def query_graph():
@@ -144,7 +181,6 @@ def query_graph():
             return jsonify({"error": "Missing 'query' in request body"}), 400
 
         query_text = data["query"]
-        # Create a HumanMessage from the query and wrap it in a list.
         initial_message = HumanMessage(content=query_text)
         input_state: OverallState = {"messages": [initial_message]}
 
@@ -155,7 +191,6 @@ def query_graph():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 if __name__ == '__main__':
     app.run(debug=True)

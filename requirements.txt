@@ -19,3 +19,4 @@ wikipedia
 trustcall
 langgraph-cli
 youtube-transcript-api
+pydantic
