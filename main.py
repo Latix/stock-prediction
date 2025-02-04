@@ -51,10 +51,11 @@ prompt = PromptTemplate(
         "change_percent",
         "moving_avg_50",
         "moving_avg_200",
-        "volatility"
+        "volatility",
     ],
     template=trading_prompt_template,
 )
+
 
 @app.route("/api/stock-advice", methods=["POST"])
 def stock_advice():
@@ -74,8 +75,12 @@ def stock_advice():
 
         # Calculate key metrics
         current_price = round(history["Close"][-1], 2)
-        previous_close = round(history["Close"][-2], 2) if len(history) > 1 else current_price
-        change_percent = round(((current_price - previous_close) / previous_close) * 100, 2)
+        previous_close = (
+            round(history["Close"][-2], 2) if len(history) > 1 else current_price
+        )
+        change_percent = round(
+            ((current_price - previous_close) / previous_close) * 100, 2
+        )
         moving_avg_50 = round(history["Close"].rolling(window=50).mean().iloc[-1], 2)
         moving_avg_200 = round(history["Close"].rolling(window=200).mean().iloc[-1], 2)
         volatility = round(history["Close"].pct_change().std() * 100, 2)
@@ -88,7 +93,7 @@ def stock_advice():
             change_percent=change_percent,
             moving_avg_50=moving_avg_50,
             moving_avg_200=moving_avg_200,
-            volatility=volatility
+            volatility=volatility,
         )
 
         # Get advice from LangChain model
@@ -98,6 +103,7 @@ def stock_advice():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(debug=True, port=9092)
